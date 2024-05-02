@@ -1,3 +1,20 @@
+# From mau
+
+This repo is where I attempt the controls challenge by using Reinforced Learning for teaching a controller to use the best steering_action in regards to the state of the controller [`vEgo`, `aEgo`, `rollAccel`, `current_lataccel`].
+
+The idea I have is to have the controller (in RL terms the `agent`) be rewarded on every epsiode where it successfully uses the appropriate action that leads to a difference between `current_lataccel` and `target_lataccel` be close to 0 while also maintaining the smallest jerk _cost as possible.
+
+For the agent this will take some generations to produce since I'm sure initially it will need to understand the actions as well as the patterns from agent states to be able to produce great results.
+
+As this is my first time ever looking into RL, I'll also include Resources that I've used to help me in this challenge.
+
+As of now I have full understanding of the problem and what the RL agent will need in order to start learning. The next step is to actually train the model which will be a first for me.
+
+## Resource Links
+
+* [For understanding RL concepts](https://www.youtube.com/watch?v=TCCjZe0y4Qc&list=PLqYmG7hTraZDVH599EItlEWsUOsJbAodm&index=2)
+* [For understanding RL Implementation in Python](https://www.youtube.com/watch?v=Mut_u40Sqz4&t=2853s)
+
 # Comma Controls Challenge!
 ![Car](./imgs/car.jpg)
 

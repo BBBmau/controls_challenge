@@ -151,7 +151,7 @@ class TinyPhysicsSimulator:
     self.state_history.append(state)
     self.target_lataccel_history.append(target)
     self.control_step(self.step_idx)
-    self.sim_step(self.step_idx)
+    self.sim_step(self.step_idx) # does the prediction of lataccel based on steering action set by controller
     self.step_idx += 1
 
   def plot_data(self, ax, lines, axis_labels, title) -> None:
