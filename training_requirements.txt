@@ -1,2 +1,4 @@
 tf_agents
+tensorflow-probability==0.24.0
 tensorflow
+tf-keras
