@@ -5,7 +5,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import signal
-
+from typing import Tuple
+from tinygrad import Tensor, TinyJit, nn
+import time
 from collections import namedtuple
 from hashlib import md5
 from pathlib import Path
@@ -29,6 +31,38 @@ LAT_ACCEL_COST_MULTIPLIER = 5.0
 
 State = namedtuple('State', ['roll_lataccel', 'v_ego', 'a_ego'])
 
+# hyperparameters that are taken from `beautiful_cartpole.py`
+# https://github.com/tinygrad/tinygrad/blob/master/examples/beautiful_cartpole.py
+BATCH_SIZE = 256
+ENTROPY_SCALE = 0.0005
+REPLAY_BUFFER_SIZE = 2000
+PPO_EPSILON = 0.2
+HIDDEN_UNITS = 32
+LEARNING_RATE = 1e-2
+TRAIN_STEPS = 5
+EPISODES = 40
+DISCOUNT_FACTOR = 0.99
+LEARNING = False
+st, steps = time.perf_counter(), 0
+Xn, An, Rn = [], [], []
+reward = []
+
+class ActorCritic:
+  def __init__(self, in_features=State.count + 2, out_features=np.arange(-2,2,0.01), hidden_state=HIDDEN_UNITS) -> None:
+    # our in_features is our observation space which is our State[v_ego, a_ego, roll_lataccel] + [target_lataccel, current_lataccel]
+    # out features is the steering_action (float32) with a step of 0.01 we get 400 different steering actions
+    self.l1 = nn.Linear(in_features, hidden_state)
+    self.l2 = nn.Linear(hidden_state, out_features)
+
+    self.c1 = nn.Linear(in_features, hidden_state)
+    self.c2 = nn.Linear(hidden_state, 1)
+    self.opt = nn.optim.Adam(nn.state.get_parameters(self), lr=LEARNING_RATE)
+
+  def __call__(self, obs:Tensor) -> Tuple[Tensor, Tensor]:
+    x = self.l1(obs).tanh()
+    act = self.l2(x).log_softmax()
+    x = self.c1(obs).relu()
+    return act, self.c2(x)
 
 class LataccelTokenizer:
   def __init__(self):
@@ -130,12 +164,20 @@ class TinyPhysicsSimulator:
       self.current_lataccel = pred
     else:
       self.current_lataccel = self.get_state_target(step_idx)[1]
-
+             #(difference in predicted lataccel, difference in before/after lataccel [jerk])
+             # the lower the reward the better
+    reward.append(abs(self.current_lataccel - self.get_state_target(step_idx)[1]) + abs(self.current_lataccel - self.current_lataccel_history[-1]))
     self.current_lataccel_history.append(self.current_lataccel)
 
   def control_step(self, step_idx: int) -> None:
     if step_idx >= CONTROL_START_IDX:
-      action = self.controller.update(self.target_lataccel_history[step_idx], self.current_lataccel, self.state_history[step_idx])
+      if LEARNING:
+        obs = [self.target_lataccel_history[step_idx], self.current_lataccel] + self.state_history[step_idx]
+        action = get_action(Tensor(obs).item())
+        Xn.append(np.copy(obs))
+        An.append(action)
+      else: 
+        action = self.controller.update(self.target_lataccel_history[step_idx], self.current_lataccel, self.state_history[step_idx])
     else:
       action = self.data['steer_command'].values[step_idx]
     action = np.clip(action, STEER_RANGE[0], STEER_RANGE[1])
@@ -149,8 +191,8 @@ class TinyPhysicsSimulator:
     state, target = self.get_state_target(self.step_idx)
     self.state_history.append(state)
     self.target_lataccel_history.append(target)
-    self.control_step(self.step_idx)
-    self.sim_step(self.step_idx) # does the prediction of lataccel based on steering action set by controller
+    self.control_step(self.step_idx) # function where the steering_action is computed based on state
+    self.sim_step(self.step_idx) # applies the steering_action which results in going into a new state (step) with new lataccel
     self.step_idx += 1
 
   def plot_data(self, ax, lines, axis_labels, title) -> None:
@@ -166,7 +208,6 @@ class TinyPhysicsSimulator:
   def compute_cost(self) -> dict:
     target = np.array(self.target_lataccel_history)[CONTROL_START_IDX:]
     pred = np.array(self.current_lataccel_history)[CONTROL_START_IDX:]
-
     lat_accel_cost = np.mean((target - pred)**2) * 100
     jerk_cost = np.mean((np.diff(pred) / DEL_T)**2) * 100
     total_cost = (lat_accel_cost * LAT_ACCEL_COST_MULTIPLIER) + jerk_cost
@@ -176,7 +217,7 @@ class TinyPhysicsSimulator:
     if self.debug:
       plt.ion()
       fig, ax = plt.subplots(4, figsize=(12, 14), constrained_layout=True)
-
+    get_action.reset()
     for _ in range(CONTEXT_LENGTH, len(self.data)):
       self.step()
       if self.debug and self.step_idx % 10 == 0:
@@ -186,15 +227,26 @@ class TinyPhysicsSimulator:
         self.plot_data(ax[2], [(np.array(self.state_history)[:, 0], 'Roll Lateral Acceleration')], ['Step', 'Lateral Accel due to Road Roll'], 'Lateral Accel due to Road Roll')
         self.plot_data(ax[3], [(np.array(self.state_history)[:, 1], 'v_ego')], ['Step', 'v_ego'], 'v_ego')
         plt.pause(0.01)
+    if LEARNING:
+      discounts = np.power(DISCOUNT_FACTOR, np.arange(len(reward)))
+      Rn += [np.sum(reward[i:] * discounts[:len(reward)-i]) for i in range(len(reward))]
+      Xn, An, Rn = Xn[-REPLAY_BUFFER_SIZE:], An[-REPLAY_BUFFER_SIZE:], Rn[-REPLAY_BUFFER_SIZE:]
+      X, A, R = Tensor(Xn), Tensor(An), Tensor(Rn)
+      old_log_dist = model(X)[0].detach()   # TODO: could save these instead of recomputing
+      for i in range(TRAIN_STEPS):
+        samples = Tensor.randint(BATCH_SIZE, high=X.shape[0]).realize()  # TODO: remove the need for this
+        # TODO: is this recompiling based on the shape?
+        action_loss, entropy_loss, critic_loss = train_step(X[samples], A[samples], R[samples], old_log_dist[samples])
+      t.set_description(f"sz: {len(Xn):5d} steps/s: {steps/(time.perf_counter()-st):7.2f} action_loss: {action_loss.item():7.3f} entropy_loss: {entropy_loss.item():7.3f} critic_loss: {critic_loss.item():8.3f} reward: {sum(reward):6.2f}")
 
     if self.debug:
       plt.ioff()
       plt.show()
     return self.compute_cost()
 
-
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
+  parser.add_argument("--learn", type=bool, default=False)
   parser.add_argument("--model_path", type=str, required=True)
   parser.add_argument("--data_path", type=str, required=True)
   parser.add_argument("--num_segs", type=int, default=100)
@@ -203,27 +255,64 @@ if __name__ == "__main__":
   args = parser.parse_args()
 
   tinyphysicsmodel = TinyPhysicsModel(args.model_path, debug=args.debug)
+  acmodel = ActorCritic() # default values are set for this environment
+  opt = nn.optim.Adam(nn.state.get_parameters(acmodel), lr=LEARNING_RATE)
 
+  @TinyJit
+  def train_step(x:Tensor, selected_action:Tensor, reward:Tensor, old_log_dist:Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+    with Tensor.train():
+      log_dist, value = acmodel(x)
+      action_mask = (selected_action.reshape(-1, 1) == Tensor.arange(log_dist.shape[1]).reshape(1, -1).expand(selected_action.shape[0], -1)).float()
+          # get real advantage using the value function
+      advantage = reward.reshape(-1, 1) - value
+      masked_advantage = action_mask * advantage.detach()
+          # PPO
+      ratios = (log_dist - old_log_dist).exp()
+      unclipped_ratio = masked_advantage * ratios
+      clipped_ratio = masked_advantage * ratios.clip(1-PPO_EPSILON, 1+PPO_EPSILON)
+      action_loss = -unclipped_ratio.minimum(clipped_ratio).sum(-1).mean()
+      entropy_loss = (log_dist.exp() * log_dist).sum(-1).mean()   # this encourages diversity
+      critic_loss = advantage.square().mean()
+      opt.zero_grad()
+      (action_loss + entropy_loss*ENTROPY_SCALE + critic_loss).backward()
+      opt.step()
+      return action_loss.realize(), entropy_loss.realize(), critic_loss.realize()
+        
+  @TinyJit
+  def get_action(obs:Tensor) -> Tensor:
+    # TODO: with no_grad
+    Tensor.no_grad = True
+    ret = acmodel(obs)[0].exp().multinomial().realize()
+    Tensor.no_grad = False
+    return ret
+  LEARNING = args.learning
   data_path = Path(args.data_path)
-  if data_path.is_file():
-    controller = CONTROLLERS[args.controller]()
-    sim = TinyPhysicsSimulator(tinyphysicsmodel, args.data_path, controller=controller, debug=args.debug)
-    costs = sim.rollout()
-    print(f"\nAverage lataccel_cost: {costs['lataccel_cost']:>6.4}, average jerk_cost: {costs['jerk_cost']:>6.4}, average total_cost: {costs['total_cost']:>6.4}")
-  elif data_path.is_dir():
-    costs = []
-    files = sorted(data_path.iterdir())[:args.num_segs]
-    for data_file in tqdm(files, total=len(files)):
+  if LEARNING:
+      files = sorted(data_path.iterdir())[:args.num_segs]
+      for data_file in tqdm(files, total=len(files)): # every file is an episode
+        controller = CONTROLLERS["learning_agent"]()
+        sim = TinyPhysicsSimulator(tinyphysicsmodel, str(data_file), controller=controller, debug=args.debug)
+        _ = sim.rollout()
+  else:
+    if data_path.is_file():
       controller = CONTROLLERS[args.controller]()
-      sim = TinyPhysicsSimulator(tinyphysicsmodel, str(data_file), controller=controller, debug=args.debug)
-      cost = sim.rollout()
-      costs.append(cost)
-    costs_df = pd.DataFrame(costs)
-    print(f"\nAverage lataccel_cost: {np.mean(costs_df['lataccel_cost']):>6.4}, average jerk_cost: {np.mean(costs_df['jerk_cost']):>6.4}, average total_cost: {np.mean(costs_df['total_cost']):>6.4}")
-    for cost in costs_df.columns:
-      plt.hist(costs_df[cost], bins=np.arange(0, 1000, 10), label=cost, alpha=0.5)
-    plt.xlabel('costs')
-    plt.ylabel('Frequency')
-    plt.title('costs Distribution')
-    plt.legend()
-    plt.show()
+      sim = TinyPhysicsSimulator(tinyphysicsmodel, args.data_path, controller=controller, debug=args.debug)
+      costs = sim.rollout()
+      print(f"\nAverage lataccel_cost: {costs['lataccel_cost']:>6.4}, average jerk_cost: {costs['jerk_cost']:>6.4}, average total_cost: {costs['total_cost']:>6.4}")
+    elif data_path.is_dir():
+      costs = []
+      files = sorted(data_path.iterdir())[:args.num_segs]
+      for data_file in tqdm(files, total=len(files)):
+        controller = CONTROLLERS[args.controller]()
+        sim = TinyPhysicsSimulator(tinyphysicsmodel, str(data_file), controller=controller, debug=args.debug)
+        cost = sim.rollout()
+        costs.append(cost)
+      costs_df = pd.DataFrame(costs)
+      print(f"\nAverage lataccel_cost: {np.mean(costs_df['lataccel_cost']):>6.4}, average jerk_cost: {np.mean(costs_df['jerk_cost']):>6.4}, average total_cost: {np.mean(costs_df['total_cost']):>6.4}")
+      for cost in costs_df.columns:
+        plt.hist(costs_df[cost], bins=np.arange(0, 1000, 10), label=cost, alpha=0.5)
+      plt.xlabel('costs')
+      plt.ylabel('Frequency')
+      plt.title('costs Distribution')
+      plt.legend()
+      plt.show()
