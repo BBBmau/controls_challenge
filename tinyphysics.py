@@ -43,16 +43,16 @@ TRAIN_STEPS = 5
 EPISODES = 40
 DISCOUNT_FACTOR = 0.99
 LEARNING = False
-st, steps = time.perf_counter(), 0
+
 Xn, An, Rn = [], [], []
 reward = []
 
 class ActorCritic:
-  def __init__(self, in_features=State.count + 2, out_features=np.arange(-2,2,0.01), hidden_state=HIDDEN_UNITS) -> None:
+  def __init__(self, in_features=5, out_features=np.arange(-2,2,0.01), hidden_state=HIDDEN_UNITS) -> None:
     # our in_features is our observation space which is our State[v_ego, a_ego, roll_lataccel] + [target_lataccel, current_lataccel]
     # out features is the steering_action (float32) with a step of 0.01 we get 400 different steering actions
     self.l1 = nn.Linear(in_features, hidden_state)
-    self.l2 = nn.Linear(hidden_state, out_features)
+    self.l2 = nn.Linear(hidden_state, out_features.size)
 
     self.c1 = nn.Linear(in_features, hidden_state)
     self.c2 = nn.Linear(hidden_state, 1)
@@ -166,14 +166,15 @@ class TinyPhysicsSimulator:
       self.current_lataccel = self.get_state_target(step_idx)[1]
              #(difference in predicted lataccel, difference in before/after lataccel [jerk])
              # the lower the reward the better
+    global reward
     reward.append(abs(self.current_lataccel - self.get_state_target(step_idx)[1]) + abs(self.current_lataccel - self.current_lataccel_history[-1]))
     self.current_lataccel_history.append(self.current_lataccel)
 
   def control_step(self, step_idx: int) -> None:
     if step_idx >= CONTROL_START_IDX:
       if LEARNING:
-        obs = [self.target_lataccel_history[step_idx], self.current_lataccel] + self.state_history[step_idx]
-        action = get_action(Tensor(obs).item())
+        obs = [self.target_lataccel_history[step_idx], self.current_lataccel] + [self.state_history[step_idx].v_ego] + [self.state_history[step_idx].roll_lataccel] + [self.state_history[step_idx].a_ego]
+        action = get_action(Tensor(obs)).item()
         Xn.append(np.copy(obs))
         An.append(action)
       else: 
@@ -214,10 +215,12 @@ class TinyPhysicsSimulator:
     return {'lataccel_cost': lat_accel_cost, 'jerk_cost': jerk_cost, 'total_cost': total_cost}
 
   def rollout(self) -> float:
+    global reward, Xn, Rn, An
     if self.debug:
       plt.ion()
       fig, ax = plt.subplots(4, figsize=(12, 14), constrained_layout=True)
     get_action.reset()
+    st, steps = time.perf_counter(), 0
     for _ in range(CONTEXT_LENGTH, len(self.data)):
       self.step()
       if self.debug and self.step_idx % 10 == 0:
@@ -232,18 +235,20 @@ class TinyPhysicsSimulator:
       Rn += [np.sum(reward[i:] * discounts[:len(reward)-i]) for i in range(len(reward))]
       Xn, An, Rn = Xn[-REPLAY_BUFFER_SIZE:], An[-REPLAY_BUFFER_SIZE:], Rn[-REPLAY_BUFFER_SIZE:]
       X, A, R = Tensor(Xn), Tensor(An), Tensor(Rn)
-      old_log_dist = model(X)[0].detach()   # TODO: could save these instead of recomputing
+      old_log_dist = acmodel(X)[0].detach()   # TODO: could save these instead of recomputing
       for i in range(TRAIN_STEPS):
         samples = Tensor.randint(BATCH_SIZE, high=X.shape[0]).realize()  # TODO: remove the need for this
         # TODO: is this recompiling based on the shape?
         action_loss, entropy_loss, critic_loss = train_step(X[samples], A[samples], R[samples], old_log_dist[samples])
-      t.set_description(f"sz: {len(Xn):5d} steps/s: {steps/(time.perf_counter()-st):7.2f} action_loss: {action_loss.item():7.3f} entropy_loss: {entropy_loss.item():7.3f} critic_loss: {critic_loss.item():8.3f} reward: {sum(reward):6.2f}")
+      print(f"sz: {len(Xn):5d} steps/s: {steps/(time.perf_counter()-st):7.2f} action_loss: {action_loss.item():7.3f} entropy_loss: {entropy_loss.item():7.3f} critic_loss: {critic_loss.item():8.3f} reward: {sum(reward):6.2f}")
 
     if self.debug:
       plt.ioff()
       plt.show()
     return self.compute_cost()
 
+Xn, An, Rn = [], [], []
+reward = []
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("--learn", type=bool, default=False)
@@ -285,12 +290,13 @@ if __name__ == "__main__":
     ret = acmodel(obs)[0].exp().multinomial().realize()
     Tensor.no_grad = False
     return ret
-  LEARNING = args.learning
+  
+  LEARNING = args.learn
   data_path = Path(args.data_path)
   if LEARNING:
       files = sorted(data_path.iterdir())[:args.num_segs]
+      controller = CONTROLLERS[args.controller]()
       for data_file in tqdm(files, total=len(files)): # every file is an episode
-        controller = CONTROLLERS["learning_agent"]()
         sim = TinyPhysicsSimulator(tinyphysicsmodel, str(data_file), controller=controller, debug=args.debug)
         _ = sim.rollout()
   else:
