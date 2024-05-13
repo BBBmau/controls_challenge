@@ -1,6 +1,7 @@
 import numpy as np
 from tinygrad import Tensor, TinyJit, nn
 from typing import Tuple
+import tinyphysics
 
 class BaseController:
   def update(self, target_lataccel, current_lataccel, state):
@@ -17,6 +18,7 @@ LEARNING_RATE = 1e-2
 TRAIN_STEPS = 5
 EPISODES = 40
 DISCOUNT_FACTOR = 0.99
+steerVal = np.arange(-2,2,0.01)
 
 # class ActorCriticController:
 #   def __init__(self, in_features=tinyphysics.State.count + 2, out_features=np.arange(-2,2,0.01), hidden_state=HIDDEN_UNITS) -> None:
@@ -76,27 +78,19 @@ class SimpleController(BaseController):
   def update(self, target_lataccel, current_lataccel, state):
     return (target_lataccel - current_lataccel) * 0.3
   
-class Agent(BaseController):
-  def update(self, target_lataccel, current_lataccel, state):
-    # Create a default RandomState
-    rng = np.random.default_rng()
-
-    # Generate a random float32 between -2 and 2
-    random_steering_action = rng.uniform(-2, 2, dtype=np.float32)   
-    return random_steering_action
-  
 # State = namedtuple('State', ['roll_lataccel', 'v_ego', 'a_ego'])
-class MauController(BaseController):
+class RLController(BaseController):
+    def __init__(self):
+      # and load it back in
+      state_dict = tinyphysics.safe_load("controllermodel.safetensors")
+      tinyphysics.load_state_dict(tinyphysics.acmodel, state_dict)
     def update(self, target_lataccel, current_lataccel, state):
-      print("[UPDATE] Current lataccel: ",current_lataccel, ", Target lataccel: ", target_lataccel)
-      if target_lataccel - current_lataccel > 0 :
-        return -0.1
-      if target_lataccel - current_lataccel < 0 :
-        return 0.1
-      return 0
+      stateD = state._asdict()
+      obs = [target_lataccel, current_lataccel] + [stateD['v_ego']] + [stateD['roll_lataccel']] + [stateD['a_ego']]
+      return steerVal[tinyphysics.acmodel(Tensor(obs))[0].argmax().item()]
 
 CONTROLLERS = {
   'open': OpenController,
   'simple': SimpleController,
-  'mau' : MauController,
+  "learning_agent": RLController,
 }
