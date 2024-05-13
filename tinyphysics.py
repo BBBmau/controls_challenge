@@ -46,7 +46,7 @@ LEARNING = False
 
 Xn, An, Rn = [], [], []
 reward = []
-
+steerVal = np.arange(-2,2,0.01)
 class ActorCritic:
   def __init__(self, in_features=5, out_features=np.arange(-2,2,0.01), hidden_state=HIDDEN_UNITS) -> None:
     # our in_features is our observation space which is our State[v_ego, a_ego, roll_lataccel] + [target_lataccel, current_lataccel]
@@ -167,20 +167,24 @@ class TinyPhysicsSimulator:
              #(difference in predicted lataccel, difference in before/after lataccel [jerk])
              # the lower the reward the better
     global reward
-    reward.append(abs(self.current_lataccel - self.get_state_target(step_idx)[1]) + abs(self.current_lataccel - self.current_lataccel_history[-1]))
+    rew = 0
+    if abs(self.current_lataccel - self.get_state_target(step_idx)[1]) + abs(self.current_lataccel - self.current_lataccel_history[-1]) < 1:
+      rew = 1
+    reward.append(rew)
     self.current_lataccel_history.append(self.current_lataccel)
 
   def control_step(self, step_idx: int) -> None:
     if step_idx >= CONTROL_START_IDX:
       if LEARNING:
         obs = [self.target_lataccel_history[step_idx], self.current_lataccel] + [self.state_history[step_idx].v_ego] + [self.state_history[step_idx].roll_lataccel] + [self.state_history[step_idx].a_ego]
-        action = get_action(Tensor(obs)).item()
+        action = steerVal[get_action(Tensor(obs)).item()]
         Xn.append(np.copy(obs))
         An.append(action)
       else: 
         action = self.controller.update(self.target_lataccel_history[step_idx], self.current_lataccel, self.state_history[step_idx])
     else:
       action = self.data['steer_command'].values[step_idx]
+    print(action)
     action = np.clip(action, STEER_RANGE[0], STEER_RANGE[1])
     self.action_history.append(action)
 
