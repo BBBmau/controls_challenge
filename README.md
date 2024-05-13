@@ -10,6 +10,16 @@ As this is my first time ever looking into RL, I'll also include Resources that 
 
 As of now I have full understanding of the problem and what the RL agent will need in order to start learning. The next step is to actually train the model which will be a first for me.
 
+## Training a dumby RL model
+
+When first looking to training an agent for this problem, the goto seemed to be tensorflow due to the amount of documentation that existed for it, however I soon realized how difficult to get something up for something that wasn't entirely massive (by this I mean not a lot of inputs and outputs for the neural network.)
+
+From this I then looked into tinygrad as an alternative, I had this in mind at first but felt that it would be too complicated to follow due to docs but the selling point was how tinygrad is meant for training models very quickly without the need of large code blocks such as what's found when using tensorflow/pytorch.
+
+I was able to use [examples/beautiful_cartpole.py](https://github.com/tinygrad/tinygrad/blob/master/examples/beautiful_cartpole.py) as reference when working on this and will also be using [examples/rl/lightupbutton.py](https://github.com/tinygrad/tinygrad/blob/master/examples/rl/lightupbutton.py) to improve how rewards are handled.
+
+As of `5/13/24` I have a model that can control the steering, not the best controller but it is a start to how RL can be used to tackle the controls_challenge.
+
 ## Resource Links
 
 * [For understanding RL concepts](https://www.youtube.com/watch?v=TCCjZe0y4Qc&list=PLqYmG7hTraZDVH599EItlEWsUOsJbAodm&index=2)
